@@ -38,17 +38,6 @@ fun MqttFeedScreen(viewModel: MqttViewModel = viewModel()) {
     // Состояние для удаляемого сообщения
     var messageToDelete by remember { mutableStateOf<String?>(null) }
 
-    // Автоматическое переподключение при возвращении на экран
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                viewModel.startMqttIfNeeded()
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
     // Проверяем, нужно ли подсветить сообщение (при переходе из уведомления)
     LaunchedEffect(Unit) {
         val intent = (context as? android.app.Activity)?.intent

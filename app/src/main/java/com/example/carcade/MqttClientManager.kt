@@ -3,6 +3,7 @@ package com.example.carcade
 import android.util.Log
 import org.eclipse.paho.client.mqttv3.*
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
+import javax.net.ssl.SSLSocketFactory
 
 object MqttClientManager {
     private const val TAG = "MqttClientManager"
@@ -41,13 +42,14 @@ object MqttClientManager {
                 keepAliveInterval = 60
                 isAutomaticReconnect = true
                 maxInflight = 10
+                // Для фоновой работы увеличиваем таймауты
+                executorServiceTimeout = 30
             }
 
             mqttClient?.setCallback(object : MqttCallbackExtended {
                 override fun connectComplete(reconnect: Boolean, serverURI: String?) {
                     Log.i(TAG, "Подключение завершено, reconnect=$reconnect")
                     try {
-                        // QoS 2 – гарантированная доставка без дубликатов
                         mqttClient?.subscribe(DEFAULT_TOPIC, 2)
                         Log.i(TAG, "Подписка на $DEFAULT_TOPIC (QoS 2)")
                     } catch (e: MqttException) {
@@ -61,14 +63,14 @@ object MqttClientManager {
 
                 override fun connectionLost(cause: Throwable?) {
                     isConnected = false
-                    Log.e(TAG, "Соединение потеряно: ${cause?.message}")
+                    Log.w(TAG, "Соединение потеряно, будет автоматическое переподключение")
                     onStatus(ConnectionState.Disconnected)
                 }
 
                 override fun messageArrived(topic: String?, message: MqttMessage?) {
                     message?.let {
                         val payload = String(it.payload)
-                        Log.d(TAG, "Сообщение получено: $payload")
+                        Log.d(TAG, "Сообщение получено: ${payload.take(100)}")
                         onMessage(payload)
                     }
                 }

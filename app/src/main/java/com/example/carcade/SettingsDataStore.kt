@@ -12,6 +12,6 @@ class SettingsDataStore(context: Context) {
         set(value) = prefs.edit { putString("device_filter", value) }
 
     var notifyIntervalMinutes: Int
-        get() = prefs.getInt("notify_interval_minutes", 5)
+        get() = prefs.getInt("notify_interval_minutes", 0)
         set(value) = prefs.edit { putInt("notify_interval_minutes", value) }
 }

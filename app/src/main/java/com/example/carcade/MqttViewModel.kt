@@ -1,15 +1,18 @@
 package com.example.carcade
 
 import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import org.json.JSONObject
-import java.util.UUID
 
 data class MqttMessageItem(
-    val id: String = UUID.randomUUID().toString(),  // Уникальный ID для связи с уведомлением
+    val id: String = "",
     val body: String,
     val timestamp: Long,
     val time: String? = null,
@@ -19,7 +22,6 @@ data class MqttMessageItem(
 
 class MqttViewModel(application: Application) : AndroidViewModel(application) {
     private val settings = SettingsDataStore(application)
-    private val notificationHelper = NotificationHelper(application)
 
     private val _messages = MutableStateFlow<List<MqttMessageItem>>(emptyList())
     val messages: StateFlow<List<MqttMessageItem>> = _messages
@@ -27,36 +29,68 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState
 
-    private var lastMessageTime: Long = 0
-    private var connectRequested = false
-    private var messageCounter = 0  // Счётчик для ID уведомлений
-
-    init {
-        startMqttIfNeeded()
-    }
-
-    fun startMqttIfNeeded() {
-        if (MqttClientManager.isConnected || connectRequested) return
-        connectRequested = true
-
-        Thread {
-            MqttClientManager.connect(
-                onMessage = { payload -> handleIncomingMessage(payload) },
-                onStatus = { state ->
-                    _connectionState.value = state
-                    if (state is ConnectionState.Error || state is ConnectionState.Disconnected) {
-                        connectRequested = false
+    private val messageReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                MqttForegroundService.BROADCAST_STATUS -> {
+                    val state = intent.getStringExtra(MqttForegroundService.EXTRA_CONNECTION_STATE) ?: return
+                    _connectionState.value = when (state) {
+                        "connected" -> ConnectionState.Connected
+                        "connecting" -> ConnectionState.Connecting
+                        "disconnected" -> ConnectionState.Disconnected
+                        "error" -> {
+                            val errorMsg = intent.getStringExtra("error_message") ?: "Неизвестная ошибка"
+                            ConnectionState.Error(errorMsg)
+                        }
+                        else -> ConnectionState.Disconnected
                     }
                 }
-            )
-        }.start()
+                MqttForegroundService.BROADCAST_MESSAGE -> {
+                    val id = intent.getStringExtra(MqttForegroundService.EXTRA_MESSAGE_ID) ?: ""
+                    val body = intent.getStringExtra(MqttForegroundService.EXTRA_MESSAGE_BODY) ?: return
+                    val time = intent.getStringExtra(MqttForegroundService.EXTRA_MESSAGE_TIME)
+                    val lat = intent.getDoubleExtra(MqttForegroundService.EXTRA_MESSAGE_LAT, 0.0)
+                    val lng = intent.getDoubleExtra(MqttForegroundService.EXTRA_MESSAGE_LNG, 0.0)
+                    val timestamp = intent.getLongExtra(MqttForegroundService.EXTRA_MESSAGE_TIMESTAMP, System.currentTimeMillis())
+
+                    val item = MqttMessageItem(
+                        id = id,
+                        body = body,
+                        timestamp = timestamp,
+                        time = time,
+                        lat = lat,
+                        lng = lng
+                    )
+
+                    _messages.update { list ->
+                        val updated = list.toMutableList()
+                        updated.add(0, item)
+                        if (updated.size > 10) updated.removeAt(updated.lastIndex)
+                        updated
+                    }
+                }
+            }
+        }
+    }
+
+    init {
+        val filter = IntentFilter().apply {
+            addAction(MqttForegroundService.BROADCAST_STATUS)
+            addAction(MqttForegroundService.BROADCAST_MESSAGE)
+        }
+        ContextCompat.registerReceiver(
+            getApplication<Application>(),
+            messageReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
+        // Запускаем сервис, если ещё не запущен
+        MqttForegroundService.startService(getApplication())
     }
 
     fun reconnect() {
-        MqttClientManager.disconnect()
-        connectRequested = false
-        _connectionState.value = ConnectionState.Disconnected
-        startMqttIfNeeded()
+        MqttForegroundService.reconnect(getApplication())
     }
 
     fun deleteMessage(messageId: String) {
@@ -69,75 +103,13 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = emptyList()
     }
 
-    private fun handleIncomingMessage(payload: String) {
-        val filter = settings.deviceFilter.trim()
-        try {
-            val json = JSONObject(payload)
-            val device = json.optString("device", "")
-            if (filter.isNotEmpty() && device != filter) return
-
-            val time = if (json.has("time")) json.getString("time") else null
-            val lat = if (json.has("lat")) json.getDouble("lat") else 0.0
-            val lng = if (json.has("lng")) json.getDouble("lng") else 0.0
-
-            val now = System.currentTimeMillis()
-            val notificationId = 1000 + (messageCounter % 9000)  // Уникальный ID для уведомления
-            messageCounter++
-
-            val messageItem = MqttMessageItem(
-                id = notificationId.toString(),
-                body = payload,
-                timestamp = now,
-                time = time,
-                lat = lat,
-                lng = lng
-            )
-
-            val intervalMinutes = settings.notifyIntervalMinutes
-            if (shouldShowNotification(now, intervalMinutes)) {
-                notificationHelper.showNotification(
-                    getApplication(),
-                    messageItem,
-                    if (filter.isNotEmpty()) device else "",
-                    messageIndex = notificationId
-                )
-            }
-            lastMessageTime = now
-
-            _messages.update { list ->
-                val updated = list.toMutableList()
-                updated.add(0, messageItem)
-                if (updated.size > 10) updated.removeAt(updated.lastIndex)
-                updated
-            }
-        } catch (e: Exception) {
-            val now = System.currentTimeMillis()
-            val fallbackItem = MqttMessageItem(
-                body = payload,
-                timestamp = now
-            )
-            _messages.update { list ->
-                val updated = list.toMutableList()
-                updated.add(0, fallbackItem)
-                if (updated.size > 10) updated.removeAt(updated.lastIndex)
-                updated
-            }
-            if (shouldShowNotification(now)) {
-                notificationHelper.showSimpleNotification(getApplication(), payload)
-            }
-        }
-    }
-
-    private fun shouldShowNotification(now: Long, intervalMinutes: Int = settings.notifyIntervalMinutes): Boolean {
-        if (lastMessageTime == 0L) return true
-        if (intervalMinutes <= 0) return false
-        val diffMinutes = (now - lastMessageTime) / 60000
-        return diffMinutes >= intervalMinutes
-    }
-
     override fun onCleared() {
         super.onCleared()
-        MqttClientManager.disconnect()
-        connectRequested = false
+        try {
+            getApplication<Application>().unregisterReceiver(messageReceiver)
+        } catch (e: Exception) {
+            // Receiver already unregistered
+        }
+        // Не останавливаем сервис – он должен работать 24/7
     }
 }
