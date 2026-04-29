@@ -6,10 +6,12 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.net.toUri
 
 class NotificationHelper(context: Context) {
+    private val TAG = "NotificationHelper"
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     private val channelId = "mqtt_alerts"
     private val groupKey = "mqtt_messages_group"
@@ -48,15 +50,14 @@ class NotificationHelper(context: Context) {
     ) {
         val messageId = if (messageIndex >= 0) messageIndex else notificationId
 
-        // Основной Intent для открытия приложения с переходом на конкретное сообщение
+        Log.d(TAG, "Создание уведомления: messageId=$messageId, device=$device")
+
+        // Основной Intent для открытия приложения
+        // НЕ ИСПОЛЬЗУЕМ FLAG_ACTIVITY_CLEAR_TASK, чтобы не пересоздавать приложение
         val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("open_mqtt_feed", true)
             putExtra("highlight_message_id", messageId.toString())
-            putExtra("message_time", messageItem.time)
-            putExtra("message_lat", messageItem.lat)
-            putExtra("message_lng", messageItem.lng)
-            putExtra("message_body", messageItem.body.take(200))
         }
 
         val pendingIntent = PendingIntent.getActivity(
@@ -94,12 +95,12 @@ class NotificationHelper(context: Context) {
             .setAutoCancel(true)
             .setWhen(System.currentTimeMillis())
             .setShowWhen(true)
-            .setGroup(groupKey)  // Группировка уведомлений
+            .setGroup(groupKey)
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
 
-        // Если есть координаты – кнопка открытия на карте
+        // Если есть координаты – кнопки карт
         if (messageItem.lat != 0.0 && messageItem.lng != 0.0) {
-            // Яндекс.Карты
+            // Яндекс.Карты - отдельный Intent, не трогает MainActivity
             val yandexIntent = Intent(Intent.ACTION_VIEW).apply {
                 val uri = "http://maps.yandex.ru/?text=${messageItem.time ?: "Location"}" +
                         "&sll=${messageItem.lng},${messageItem.lat}" +
@@ -128,6 +129,7 @@ class NotificationHelper(context: Context) {
         }
 
         notificationManager.notify(messageId, builder.build())
+        Log.d(TAG, "Уведомление отправлено: $messageId")
 
         // Показываем сводное уведомление для группы
         showSummaryNotification(context, device)
@@ -135,7 +137,7 @@ class NotificationHelper(context: Context) {
 
     private fun showSummaryNotification(context: Context, lastDevice: String) {
         val summaryIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("open_mqtt_feed", true)
         }
 
@@ -160,7 +162,7 @@ class NotificationHelper(context: Context) {
 
     fun showSimpleNotification(context: Context, text: String) {
         val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("open_mqtt_feed", true)
         }
 

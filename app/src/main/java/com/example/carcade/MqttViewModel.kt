@@ -5,6 +5,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Build
+import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,6 +23,7 @@ data class MqttMessageItem(
 )
 
 class MqttViewModel(application: Application) : AndroidViewModel(application) {
+    private val TAG = "MqttViewModel"
     private val settings = SettingsDataStore(application)
 
     private val _messages = MutableStateFlow<List<MqttMessageItem>>(emptyList())
@@ -29,11 +32,20 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState
 
+    private val _messageCount = MutableStateFlow(0)
+    val messageCount: StateFlow<Int> = _messageCount
+
     private val messageReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
+            if (intent == null) return
+
+            Log.d(TAG, "Получен broadcast: ${intent.action}")
+
+            when (intent.action) {
                 MqttForegroundService.BROADCAST_STATUS -> {
                     val state = intent.getStringExtra(MqttForegroundService.EXTRA_CONNECTION_STATE) ?: return
+                    Log.d(TAG, "Статус соединения: $state")
+
                     _connectionState.value = when (state) {
                         "connected" -> ConnectionState.Connected
                         "connecting" -> ConnectionState.Connecting
@@ -53,6 +65,8 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
                     val lng = intent.getDoubleExtra(MqttForegroundService.EXTRA_MESSAGE_LNG, 0.0)
                     val timestamp = intent.getLongExtra(MqttForegroundService.EXTRA_MESSAGE_TIMESTAMP, System.currentTimeMillis())
 
+                    Log.d(TAG, "Получено сообщение: id=$id, time=$time, lat=$lat, lng=$lng")
+
                     val item = MqttMessageItem(
                         id = id,
                         body = body,
@@ -68,22 +82,39 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
                         if (updated.size > 10) updated.removeAt(updated.lastIndex)
                         updated
                     }
+
+                    _messageCount.update { it + 1 }
                 }
             }
         }
     }
 
     init {
+        Log.d(TAG, "ViewModel init, регистрируем receiver")
+
         val filter = IntentFilter().apply {
             addAction(MqttForegroundService.BROADCAST_STATUS)
             addAction(MqttForegroundService.BROADCAST_MESSAGE)
         }
-        ContextCompat.registerReceiver(
-            getApplication<Application>(),
-            messageReceiver,
-            filter,
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
+
+        // Используем правильный метод регистрации в зависимости от версии Android
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getApplication<Application>().registerReceiver(
+                messageReceiver,
+                filter,
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            ContextCompat.registerReceiver(
+                getApplication<Application>(),
+                messageReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }
+
+        // Запрашиваем текущий статус соединения
+        MqttForegroundService.requestStatus(getApplication())
 
         // Запускаем сервис, если ещё не запущен
         MqttForegroundService.startService(getApplication())
@@ -103,12 +134,17 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = emptyList()
     }
 
+    fun resetMessageCount() {
+        _messageCount.value = 0
+    }
+
     override fun onCleared() {
         super.onCleared()
+        Log.d(TAG, "ViewModel onCleared, отписываем receiver")
         try {
             getApplication<Application>().unregisterReceiver(messageReceiver)
         } catch (e: Exception) {
-            // Receiver already unregistered
+            Log.e(TAG, "Ошибка при отписке receiver: ${e.message}")
         }
         // Не останавливаем сервис – он должен работать 24/7
     }

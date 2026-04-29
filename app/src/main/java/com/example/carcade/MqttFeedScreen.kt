@@ -2,11 +2,15 @@ package com.example.carcade
 
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Place
@@ -14,6 +18,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -30,27 +35,59 @@ import androidx.core.net.toUri
 fun MqttFeedScreen(viewModel: MqttViewModel = viewModel()) {
     val messages by viewModel.messages.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
+    val messageCount by viewModel.messageCount.collectAsState()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
 
-    // Состояние для удаляемого сообщения
     var messageToDelete by remember { mutableStateOf<String?>(null) }
+    var highlightedMessageId by remember { mutableStateOf<String?>(null) }
 
-    // Проверяем, нужно ли подсветить сообщение (при переходе из уведомления)
+    // Проверяем переход из уведомления
     LaunchedEffect(Unit) {
-        val intent = (context as? android.app.Activity)?.intent
-        intent?.getStringExtra("highlight_message_id")?.let { messageId ->
-            // Можно анимировать прокрутку к сообщению или подсветить его
-            scope.launch {
-                snackbarHostState.showSnackbar(
-                    message = "Переход к сообщению из уведомления",
-                    duration = SnackbarDuration.Short
-                )
+        val activity = context as? android.app.Activity
+        activity?.intent?.let { intent ->
+            val messageId = intent.getStringExtra("highlight_message_id")
+            if (messageId != null) {
+                Log.d("MqttFeedScreen", "Переход к сообщению: $messageId")
+                highlightedMessageId = messageId
+
+                // Ищем индекс сообщения в списке
+                val index = messages.indexOfFirst { it.id == messageId }
+                if (index >= 0) {
+                    // Прокручиваем к сообщению
+                    listState.animateScrollToItem(index)
+                }
+
+                scope.launch {
+                    snackbarHostState.showSnackbar(
+                        message = "Переход к сообщению из уведомления",
+                        duration = SnackbarDuration.Short
+                    )
+                }
+
+                // Очищаем extra после обработки
+                intent.removeExtra("highlight_message_id")
+                intent.removeExtra("open_mqtt_feed")
+
+                // Сбрасываем подсветку через 3 секунды
+                kotlinx.coroutines.delay(3000)
+                highlightedMessageId = null
             }
-            intent.removeExtra("highlight_message_id")
         }
+    }
+
+    // Автоматическое переподключение ViewModel к сервису при возвращении на экран
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                MqttForegroundService.requestStatus(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // Показываем Snackbar при ошибке подключения
@@ -70,7 +107,7 @@ fun MqttFeedScreen(viewModel: MqttViewModel = viewModel()) {
         }
     }
 
-    // Диалог подтверждения очистки
+    // Диалог подтверждения удаления
     if (messageToDelete != null) {
         AlertDialog(
             onDismissRequest = { messageToDelete = null },
@@ -94,7 +131,7 @@ fun MqttFeedScreen(viewModel: MqttViewModel = viewModel()) {
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Статусная строка и кнопка очистки
+            // Верхняя панель со статистикой
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -102,12 +139,24 @@ fun MqttFeedScreen(viewModel: MqttViewModel = viewModel()) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "MQTT лента ESP",
-                    style = MaterialTheme.typography.titleMedium
-                )
+                Column {
+                    Text(
+                        text = "MQTT лента ESP",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    if (messageCount > 0) {
+                        Text(
+                            text = "Всего сообщений: $messageCount",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
                 if (messages.isNotEmpty()) {
-                    TextButton(onClick = { viewModel.clearAllMessages() }) {
+                    TextButton(onClick = {
+                        viewModel.clearAllMessages()
+                        viewModel.resetMessageCount()
+                    }) {
                         Icon(
                             Icons.Filled.Delete,
                             contentDescription = "Очистить все",
@@ -119,26 +168,41 @@ fun MqttFeedScreen(viewModel: MqttViewModel = viewModel()) {
                 }
             }
 
-            StatusBar(connectionState)
+            StatusBar(connectionState, messageCount)
 
             if (messages.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("Ожидание сообщений...")
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Ожидание сообщений...")
+                        if (messageCount > 0) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Получено сообщений: $messageCount",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
                 }
             } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    state = listState
+                ) {
                     items(
                         items = messages,
                         key = { it.id }
                     ) { msg ->
+                        val isHighlighted = highlightedMessageId == msg.id
+
                         val dismissState = rememberSwipeToDismissBoxState(
                             confirmValueChange = { dismissValue ->
                                 if (dismissValue == SwipeToDismissBoxValue.EndToStart) {
                                     messageToDelete = msg.id
-                                    false  // Не удаляем сразу, показываем диалог
+                                    false
                                 } else {
                                     false
                                 }
@@ -172,7 +236,34 @@ fun MqttFeedScreen(viewModel: MqttViewModel = viewModel()) {
                             enableDismissFromStartToEnd = false,
                             enableDismissFromEndToStart = true
                         ) {
-                            MessageCard(msg, context)
+                            // Анимация подсветки
+                            val backgroundColor by animateColorAsState(
+                                targetValue = if (isHighlighted) {
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                                } else {
+                                    Color.Transparent
+                                },
+                                animationSpec = tween(500),
+                                label = "highlight_bg"
+                            )
+
+                            val scale by animateFloatAsState(
+                                targetValue = if (isHighlighted) 1.02f else 1f,
+                                animationSpec = tween(300),
+                                label = "highlight_scale"
+                            )
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(backgroundColor)
+                            ) {
+                                Box(
+                                    modifier = Modifier.scale(scale)
+                                ) {
+                                    MessageCard(msg, context)
+                                }
+                            }
                         }
                     }
                 }
@@ -186,6 +277,7 @@ fun MqttFeedScreen(viewModel: MqttViewModel = viewModel()) {
     }
 }
 
+// Остальные функции (MessageCard, StatusBar) остаются без изменений
 @Composable
 fun MessageCard(msg: MqttMessageItem, context: android.content.Context) {
     Card(
@@ -255,11 +347,11 @@ fun MessageCard(msg: MqttMessageItem, context: android.content.Context) {
 }
 
 @Composable
-fun StatusBar(state: ConnectionState) {
+fun StatusBar(state: ConnectionState, messageCount: Int = 0) {
     val (text, color) = when (state) {
-        ConnectionState.Connected -> "Подключено" to MaterialTheme.colorScheme.primary
+        ConnectionState.Connected -> "Подключено • Сообщений: $messageCount" to MaterialTheme.colorScheme.primary
         ConnectionState.Connecting -> "Подключение..." to MaterialTheme.colorScheme.secondary
-        is ConnectionState.Error -> "Ошибка" to MaterialTheme.colorScheme.error
+        is ConnectionState.Error -> "Ошибка: ${state.message}" to MaterialTheme.colorScheme.error
         ConnectionState.Disconnected -> "Отключено" to MaterialTheme.colorScheme.outline
     }
 
@@ -271,13 +363,25 @@ fun StatusBar(state: ConnectionState) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (state == ConnectionState.Connecting) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(Modifier.width(8.dp))
+            when (state) {
+                ConnectionState.Connecting -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                ConnectionState.Connected -> {
+                    Icon(
+                        Icons.Filled.Place,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = color
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                else -> {}
             }
             Text(
                 text = text,

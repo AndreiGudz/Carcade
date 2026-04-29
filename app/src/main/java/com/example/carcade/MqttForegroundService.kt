@@ -21,6 +21,8 @@ class MqttForegroundService : Service() {
     private lateinit var settings: SettingsDataStore
     private var lastMessageTime: Long = 0
     private var isServiceStarted = false
+    private var currentConnectionState: ConnectionState = ConnectionState.Disconnected
+    private var messageCount = 0
 
     companion object {
         const val TAG = "MqttForegroundService"
@@ -31,6 +33,7 @@ class MqttForegroundService : Service() {
         const val ACTION_START = "com.example.carcade.action.START"
         const val ACTION_STOP = "com.example.carcade.action.STOP"
         const val ACTION_RECONNECT = "com.example.carcade.action.RECONNECT"
+        const val ACTION_REQUEST_STATUS = "com.example.carcade.action.REQUEST_STATUS"
 
         // Broadcast для обновления UI
         const val BROADCAST_STATUS = "com.example.carcade.MQTT_STATUS"
@@ -42,6 +45,7 @@ class MqttForegroundService : Service() {
         const val EXTRA_MESSAGE_LNG = "message_lng"
         const val EXTRA_MESSAGE_TIMESTAMP = "message_timestamp"
         const val EXTRA_MESSAGE_ID = "message_id"
+        const val EXTRA_MESSAGE_COUNT = "message_count"
 
         fun startService(context: Context) {
             // Проверяем разрешения перед запуском
@@ -74,19 +78,20 @@ class MqttForegroundService : Service() {
             context.startService(intent)
         }
 
-        private fun hasRequiredPermissions(context: Context): Boolean {
-            val hasForegroundService =
-                ContextCompat.checkSelfPermission(
-                    context,
-                    android.Manifest.permission.FOREGROUND_SERVICE
-                ) == PackageManager.PERMISSION_GRANTED
+        fun requestStatus(context: Context) {
+            val intent = Intent(context, MqttForegroundService::class.java).apply {
+                action = ACTION_REQUEST_STATUS
+            }
+            context.startService(intent)
+        }
 
+        private fun hasRequiredPermissions(context: Context): Boolean {
             val hasInternet = ContextCompat.checkSelfPermission(
                 context,
                 android.Manifest.permission.INTERNET
             ) == PackageManager.PERMISSION_GRANTED
 
-            return hasForegroundService && hasInternet
+            return hasInternet
         }
     }
 
@@ -118,8 +123,13 @@ class MqttForegroundService : Service() {
                 }
                 ACTION_RECONNECT -> {
                     updateStatusNotification("Переподключение...")
+                    broadcastStatus("connecting")
                     stopMqttConnection()
                     startMqttConnection()
+                }
+                ACTION_REQUEST_STATUS -> {
+                    // Отправляем текущий статус и количество сообщений
+                    broadcastCurrentStatus()
                 }
                 else -> {
                     // Запуск без явного action (например, при перезагрузке)
@@ -132,7 +142,6 @@ class MqttForegroundService : Service() {
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "SecurityException: ${e.message}. Проверьте разрешения в манифесте.")
-            // Если не удалось запустить foreground service, пробуем запустить как обычный
             try {
                 if (!isServiceStarted) {
                     startMqttConnection()
@@ -161,7 +170,6 @@ class MqttForegroundService : Service() {
         try {
             val notification = createStatusNotification("Запуск...")
 
-            // Для Android 14+ используем новый метод
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(
                     NOTIFICATION_ID,
@@ -169,7 +177,6 @@ class MqttForegroundService : Service() {
                     android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                 )
             } else {
-                // Устаревший метод для Android 13 и ниже
                 @Suppress("DEPRECATION")
                 startForeground(NOTIFICATION_ID, notification)
             }
@@ -186,9 +193,10 @@ class MqttForegroundService : Service() {
             MqttClientManager.connect(
                 onMessage = { payload -> handleMessage(payload) },
                 onStatus = { state ->
+                    currentConnectionState = state
                     when (state) {
                         is ConnectionState.Connected -> {
-                            updateStatusNotification("Подключено")
+                            updateStatusNotification("Подключено • Сообщений: $messageCount")
                             broadcastStatus("connected")
                         }
                         is ConnectionState.Connecting -> {
@@ -196,7 +204,7 @@ class MqttForegroundService : Service() {
                             broadcastStatus("connecting")
                         }
                         is ConnectionState.Disconnected -> {
-                            updateStatusNotification("Отключено")
+                            updateStatusNotification("Отключено • Сообщений: $messageCount")
                             broadcastStatus("disconnected")
                         }
                         is ConnectionState.Error -> {
@@ -239,6 +247,9 @@ class MqttForegroundService : Service() {
 
             val now = System.currentTimeMillis()
             val messageId = (now % 100000).toString()
+            messageCount++
+
+            Log.d(TAG, "Обработано сообщение #$messageCount от $device")
 
             // Проверяем интервал для уведомлений
             val intervalMinutes = settings.notifyIntervalMinutes
@@ -260,8 +271,11 @@ class MqttForegroundService : Service() {
             }
             lastMessageTime = now
 
+            // Обновляем уведомление сервиса с количеством сообщений
+            updateStatusNotification("Подключено • Сообщений: $messageCount")
+
             // Отправляем broadcast в UI
-            broadcastMessage(messageId, payload, time, lat, lng, now)
+            broadcastMessage(messageId, payload, time, lat, lng, now, messageCount)
 
         } catch (e: Exception) {
             // Невалидный JSON – игнорируем
@@ -307,6 +321,7 @@ class MqttForegroundService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
     }
 
@@ -326,8 +341,23 @@ class MqttForegroundService : Service() {
             if (errorMessage != null) {
                 putExtra("error_message", errorMessage)
             }
+            putExtra(EXTRA_MESSAGE_COUNT, messageCount)
         }
         sendBroadcast(intent)
+    }
+
+    private fun broadcastCurrentStatus() {
+        val state = when (currentConnectionState) {
+            is ConnectionState.Connected -> "connected"
+            is ConnectionState.Connecting -> "connecting"
+            is ConnectionState.Disconnected -> "disconnected"
+            is ConnectionState.Error -> "error"
+        }
+        val errorMsg = if (currentConnectionState is ConnectionState.Error) {
+            (currentConnectionState as ConnectionState.Error).message
+        } else null
+
+        broadcastStatus(state, errorMsg)
     }
 
     private fun broadcastMessage(
@@ -336,7 +366,8 @@ class MqttForegroundService : Service() {
         time: String?,
         lat: Double,
         lng: Double,
-        timestamp: Long
+        timestamp: Long,
+        count: Int = messageCount
     ) {
         val intent = Intent(BROADCAST_MESSAGE).apply {
             putExtra(EXTRA_MESSAGE_ID, id)
@@ -345,6 +376,7 @@ class MqttForegroundService : Service() {
             putExtra(EXTRA_MESSAGE_LAT, lat)
             putExtra(EXTRA_MESSAGE_LNG, lng)
             putExtra(EXTRA_MESSAGE_TIMESTAMP, timestamp)
+            putExtra(EXTRA_MESSAGE_COUNT, count)
         }
         sendBroadcast(intent)
     }

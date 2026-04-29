@@ -1,8 +1,10 @@
 package com.example.carcade
 
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.padding
@@ -22,27 +24,47 @@ import androidx.navigation.compose.rememberNavController
 import com.example.carcade.ui.theme.CarcadeTheme
 
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val REQUEST_CODE_NOTIFICATIONS = 1001
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.d(TAG, "onCreate called")
+
         val settings = SettingsDataStore(this)
 
-        // Проверяем, открыто ли приложение из уведомления
-        val openMqttFeed = intent?.getBooleanExtra("open_mqtt_feed", false) ?: false
+        // Проверяем и логируем Intent
+        handleIncomingIntent(intent)
 
         setContent {
             CarcadeTheme {
                 val navController = rememberNavController()
                 val mqttViewModel: MqttViewModel = viewModel()
 
-                // Если пришли из уведомления – переходим на MQTT ленту
+                // Обрабатываем навигацию при переходе из уведомления
                 LaunchedEffect(Unit) {
-                    if (openMqttFeed) {
-                        navController.navigate("mqtt_feed") {
-                            popUpTo(navController.graph.findStartDestination().id) {
-                                saveState = true
+                    intent?.let { incomingIntent ->
+                        val openMqttFeed = incomingIntent.getBooleanExtra("open_mqtt_feed", false)
+                        val highlightMessageId = incomingIntent.getStringExtra("highlight_message_id")
+
+                        if (openMqttFeed) {
+                            Log.d(TAG, "Переход из уведомления, highlightMessageId=$highlightMessageId")
+
+                            // Переходим на экран MQTT ленты
+                            navController.navigate("mqtt_feed") {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    saveState = true
+                                }
+                                launchSingleTop = true
+                                restoreState = true
                             }
-                            launchSingleTop = true
-                            restoreState = true
+
+                            // Очищаем extras, чтобы не обрабатывать повторно
+                            incomingIntent.removeExtra("open_mqtt_feed")
+                            incomingIntent.removeExtra("highlight_message_id")
                         }
                     }
                 }
@@ -118,9 +140,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        Log.d(TAG, "onNewIntent called")
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
     override fun onStart() {
         super.onStart()
         checkAndRequestPermissions()
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        intent?.let {
+            val openMqttFeed = it.getBooleanExtra("open_mqtt_feed", false)
+            val highlightMessageId = it.getStringExtra("highlight_message_id")
+            Log.d(TAG, "handleIncomingIntent: openMqttFeed=$openMqttFeed, highlightMessageId=$highlightMessageId")
+        }
     }
 
     private fun checkAndRequestPermissions() {
@@ -136,9 +173,5 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
-    }
-
-    companion object {
-        private const val REQUEST_CODE_NOTIFICATIONS = 1001
     }
 }
