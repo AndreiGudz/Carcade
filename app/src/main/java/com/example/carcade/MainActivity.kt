@@ -1,6 +1,5 @@
 package com.example.carcade
 
-import com.example.carcade.ui.theme.CarcadeTheme
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -10,23 +9,40 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.example.carcade.ui.theme.CarcadeTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val settings = SettingsDataStore(this)
 
+        // Проверяем, открыто ли приложение из уведомления
+        val openMqttFeed = intent?.getBooleanExtra("open_mqtt_feed", false) ?: false
+
         setContent {
             CarcadeTheme {
                 val navController = rememberNavController()
-                // ViewModel для переподключения из настроек
                 val mqttViewModel: MqttViewModel = viewModel()
+
+                // Если пришли из уведомления – переходим на MQTT ленту
+                LaunchedEffect(Unit) {
+                    if (openMqttFeed) {
+                        navController.navigate("mqtt_feed") {
+                            popUpTo(navController.graph.findStartDestination().id) {
+                                saveState = true
+                            }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    }
+                }
 
                 Scaffold(
                     bottomBar = {
@@ -37,7 +53,9 @@ class MainActivity : ComponentActivity() {
                                 selected = navController.currentDestination?.route == "mqtt_feed",
                                 onClick = {
                                     navController.navigate("mqtt_feed") {
-                                        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
                                         launchSingleTop = true
                                         restoreState = true
                                     }
@@ -49,7 +67,9 @@ class MainActivity : ComponentActivity() {
                                 selected = navController.currentDestination?.route == "settings",
                                 onClick = {
                                     navController.navigate("settings") {
-                                        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
                                         launchSingleTop = true
                                         restoreState = true
                                     }
@@ -61,7 +81,9 @@ class MainActivity : ComponentActivity() {
                                 selected = navController.currentDestination?.route == "placeholder",
                                 onClick = {
                                     navController.navigate("placeholder") {
-                                        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
                                         launchSingleTop = true
                                         restoreState = true
                                     }

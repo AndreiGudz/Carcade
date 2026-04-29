@@ -6,8 +6,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import org.json.JSONObject
+import java.util.UUID
 
 data class MqttMessageItem(
+    val id: String = UUID.randomUUID().toString(),  // Уникальный ID для связи с уведомлением
     val body: String,
     val timestamp: Long,
     val time: String? = null,
@@ -27,6 +29,7 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
 
     private var lastMessageTime: Long = 0
     private var connectRequested = false
+    private var messageCounter = 0  // Счётчик для ID уведомлений
 
     init {
         startMqttIfNeeded()
@@ -56,6 +59,16 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
         startMqttIfNeeded()
     }
 
+    fun deleteMessage(messageId: String) {
+        _messages.update { list ->
+            list.filter { it.id != messageId }
+        }
+    }
+
+    fun clearAllMessages() {
+        _messages.value = emptyList()
+    }
+
     private fun handleIncomingMessage(payload: String) {
         val filter = settings.deviceFilter.trim()
         try {
@@ -68,14 +81,25 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
             val lng = if (json.has("lng")) json.getDouble("lng") else 0.0
 
             val now = System.currentTimeMillis()
-            val messageItem = MqttMessageItem(payload, now, time, lat, lng)
+            val notificationId = 1000 + (messageCounter % 9000)  // Уникальный ID для уведомления
+            messageCounter++
+
+            val messageItem = MqttMessageItem(
+                id = notificationId.toString(),
+                body = payload,
+                timestamp = now,
+                time = time,
+                lat = lat,
+                lng = lng
+            )
 
             val intervalMinutes = settings.notifyIntervalMinutes
             if (shouldShowNotification(now, intervalMinutes)) {
                 notificationHelper.showNotification(
                     getApplication(),
                     messageItem,
-                    if (filter.isNotEmpty()) device else ""
+                    if (filter.isNotEmpty()) device else "",
+                    messageIndex = notificationId
                 )
             }
             lastMessageTime = now
@@ -88,7 +112,10 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
             }
         } catch (e: Exception) {
             val now = System.currentTimeMillis()
-            val fallbackItem = MqttMessageItem(payload, now)
+            val fallbackItem = MqttMessageItem(
+                body = payload,
+                timestamp = now
+            )
             _messages.update { list ->
                 val updated = list.toMutableList()
                 updated.add(0, fallbackItem)

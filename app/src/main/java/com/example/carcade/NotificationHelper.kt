@@ -12,9 +12,11 @@ import androidx.core.net.toUri
 class NotificationHelper(context: Context) {
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     private val channelId = "mqtt_alerts"
-    private var notificationId = 1000 // Уникальный ID для каждого уведомления
+    private val groupKey = "mqtt_messages_group"
+    private var notificationId = 1000
 
     init {
+        // Основной канал уведомлений
         val channel = NotificationChannel(
             channelId,
             "MQTT Alerts",
@@ -25,40 +27,61 @@ class NotificationHelper(context: Context) {
             setShowBadge(true)
         }
         notificationManager.createNotificationChannel(channel)
+
+        // Канал для сводного уведомления
+        val summaryChannel = NotificationChannel(
+            "mqtt_summary",
+            "MQTT Summary",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Сводка уведомлений MQTT"
+            setShowBadge(false)
+        }
+        notificationManager.createNotificationChannel(summaryChannel)
     }
 
-    /**
-     * Показывает уведомление с информацией о сообщении.
-     * @param context Контекст приложения
-     * @param messageItem Данные сообщения
-     * @param device Фильтр устройства (для заголовка уведомления)
-     */
-    fun showNotification(context: Context, messageItem: MqttMessageItem, device: String = "") {
+    fun showNotification(
+        context: Context,
+        messageItem: MqttMessageItem,
+        device: String = "",
+        messageIndex: Int = -1
+    ) {
+        val messageId = if (messageIndex >= 0) messageIndex else notificationId
+
+        // Основной Intent для открытия приложения с переходом на конкретное сообщение
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             putExtra("open_mqtt_feed", true)
+            putExtra("highlight_message_id", messageId.toString())
+            putExtra("message_time", messageItem.time)
+            putExtra("message_lat", messageItem.lat)
+            putExtra("message_lng", messageItem.lng)
+            putExtra("message_body", messageItem.body.take(200))
         }
 
         val pendingIntent = PendingIntent.getActivity(
-            context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            context,
+            messageId,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Формируем заголовок уведомления
+        // Формируем заголовок
         val title = if (device.isNotEmpty()) {
-            "Новое сообщение от $device"
+            "Сообщение от $device"
         } else {
             "Новое MQTT сообщение"
         }
 
-        // Формируем текст уведомления с основной информацией
+        // Формируем текст уведомления
         val contentText = buildString {
             if (messageItem.time != null) {
                 append("Время: ${messageItem.time}\n")
             }
             if (messageItem.lat != 0.0 && messageItem.lng != 0.0) {
-                append("Координаты: ${"%.6f".format(messageItem.lat)}, ${"%.6f".format(messageItem.lng)}\n")
+                append("📍 ${"%.6f".format(messageItem.lat)}, ${"%.6f".format(messageItem.lng)}\n")
             }
-            append(messageItem.body.take(100)) // Ограничиваем длину
+            append(messageItem.body.take(150))
         }
 
         val builder = NotificationCompat.Builder(context, channelId)
@@ -71,40 +94,79 @@ class NotificationHelper(context: Context) {
             .setAutoCancel(true)
             .setWhen(System.currentTimeMillis())
             .setShowWhen(true)
+            .setGroup(groupKey)  // Группировка уведомлений
+            .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
 
-        // Если есть координаты, добавляем кнопку "Открыть на карте"
+        // Если есть координаты – кнопка открытия на карте
         if (messageItem.lat != 0.0 && messageItem.lng != 0.0) {
-            val mapIntent = Intent(Intent.ACTION_VIEW).apply {
-                val uri = "http://maps.yandex.ru/?text=${messageItem.time ?: "Location"}&sll=${messageItem.lng},${messageItem.lat}&sspn=0.032932,0.018581&ol=geo&oll=${messageItem.lng},${messageItem.lat}&ll=${messageItem.lng},${messageItem.lat}&spn=0.067205,0.021163&z=15&l=map"
+            // Яндекс.Карты
+            val yandexIntent = Intent(Intent.ACTION_VIEW).apply {
+                val uri = "http://maps.yandex.ru/?text=${messageItem.time ?: "Location"}" +
+                        "&sll=${messageItem.lng},${messageItem.lat}" +
+                        "&sspn=0.032932,0.018581" +
+                        "&ol=geo&oll=${messageItem.lng},${messageItem.lat}" +
+                        "&ll=${messageItem.lng},${messageItem.lat}" +
+                        "&spn=0.067205,0.021163&z=15&l=map"
                 data = uri.toUri()
             }
-
-            val mapPendingIntent = PendingIntent.getActivity(
-                context, 1, mapIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            val yandexPendingIntent = PendingIntent.getActivity(
+                context, messageId + 10000, yandexIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
+            builder.addAction(android.R.drawable.ic_dialog_map, "Яндекс.Карты", yandexPendingIntent)
 
-            builder.addAction(android.R.drawable.ic_dialog_map, "На карте", mapPendingIntent)
+            // Google Maps
+            val googleIntent = Intent(Intent.ACTION_VIEW).apply {
+                val uri = "https://www.google.com/maps?ll=${messageItem.lat},${messageItem.lng}"
+                data = uri.toUri()
+            }
+            val googlePendingIntent = PendingIntent.getActivity(
+                context, messageId + 20000, googleIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(android.R.drawable.ic_dialog_map, "Google Maps", googlePendingIntent)
         }
 
-        // Показываем уведомление с уникальным ID
-        notificationManager.notify(notificationId++, builder.build())
+        notificationManager.notify(messageId, builder.build())
 
-        // Сбрасываем ID если достигли большого значения
-        if (notificationId > 9999) {
-            notificationId = 1000
-        }
+        // Показываем сводное уведомление для группы
+        showSummaryNotification(context, device)
     }
 
-    /**
-     * Показывает простое уведомление с текстом (запасной вариант)
-     */
+    private fun showSummaryNotification(context: Context, lastDevice: String) {
+        val summaryIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            putExtra("open_mqtt_feed", true)
+        }
+
+        val summaryPendingIntent = PendingIntent.getActivity(
+            context, 99999, summaryIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val summaryNotification = NotificationCompat.Builder(context, "mqtt_summary")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Новые MQTT сообщения")
+            .setContentText("Последнее от: $lastDevice")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(summaryPendingIntent)
+            .setGroup(groupKey)
+            .setGroupSummary(true)
+            .setAutoCancel(true)
+            .build()
+
+        notificationManager.notify(99999, summaryNotification)
+    }
+
     fun showSimpleNotification(context: Context, text: String) {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            putExtra("open_mqtt_feed", true)
         }
 
         val pendingIntent = PendingIntent.getActivity(
-            context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            context, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         val notification = NotificationCompat.Builder(context, channelId)
@@ -114,6 +176,7 @@ class NotificationHelper(context: Context) {
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
+            .setGroup(groupKey)
             .build()
 
         notificationManager.notify(notificationId++, notification)
