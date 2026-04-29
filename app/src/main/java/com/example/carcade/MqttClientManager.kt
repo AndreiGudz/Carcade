@@ -8,9 +8,9 @@ object MqttClientManager {
     private const val TAG = "MqttClientManager"
     private var mqttClient: MqttClient? = null
     @Volatile
-    private var isConnected = false
+    var isConnected = false
+        private set
 
-    // Параметры подключения (замените на свои)
     const val DEFAULT_HOST = "tcp://srv2.clusterfly.ru:9991"
     const val DEFAULT_USER = "user_bbe4dc60"
     const val DEFAULT_PASS = "uUXbUDySelq-T"
@@ -21,13 +21,14 @@ object MqttClientManager {
         username: String = DEFAULT_USER,
         password: String = DEFAULT_PASS,
         onMessage: (String) -> Unit,
-        onError: (Throwable) -> Unit
+        onStatus: (ConnectionState) -> Unit
     ) {
         if (isConnected) {
-            Log.d(TAG, "Уже подключены к MQTT")
+            onStatus(ConnectionState.Connected)
             return
         }
 
+        onStatus(ConnectionState.Connecting)
         try {
             val clientId = MqttClient.generateClientId()
             mqttClient = MqttClient(host, clientId, MemoryPersistence())
@@ -35,56 +36,55 @@ object MqttClientManager {
             val options = MqttConnectOptions().apply {
                 userName = username
                 setPassword(password.toCharArray())
-                isCleanSession = true
+                isCleanSession = false
                 connectionTimeout = 30
                 keepAliveInterval = 60
-                isAutomaticReconnect = true // Пытаемся автоматически переподключаться
+                isAutomaticReconnect = true
                 maxInflight = 10
             }
 
-            Log.d(TAG, "Подключение к $host...")
-            mqttClient?.connect(options)
-            isConnected = true
-            Log.d(TAG, "Соединение с MQTT установлено")
-
             mqttClient?.setCallback(object : MqttCallbackExtended {
                 override fun connectComplete(reconnect: Boolean, serverURI: String?) {
-                    Log.d(TAG, "Подключение завершено, reconnect=$reconnect, server=$serverURI")
+                    Log.i(TAG, "Подключение завершено, reconnect=$reconnect")
                     try {
-                        mqttClient?.subscribe(DEFAULT_TOPIC, 1)
-                        Log.d(TAG, "Подписка на $DEFAULT_TOPIC")
+                        // QoS 2 – гарантированная доставка без дубликатов
+                        mqttClient?.subscribe(DEFAULT_TOPIC, 2)
+                        Log.i(TAG, "Подписка на $DEFAULT_TOPIC (QoS 2)")
                     } catch (e: MqttException) {
                         Log.e(TAG, "Ошибка подписки: ${e.message}")
-                        onError(e)
+                        onStatus(ConnectionState.Error("Ошибка подписки"))
+                        return
                     }
+                    isConnected = true
+                    onStatus(ConnectionState.Connected)
                 }
 
                 override fun connectionLost(cause: Throwable?) {
                     isConnected = false
                     Log.e(TAG, "Соединение потеряно: ${cause?.message}")
-                    onError(cause ?: Exception("Connection lost"))
+                    onStatus(ConnectionState.Disconnected)
                 }
 
                 override fun messageArrived(topic: String?, message: MqttMessage?) {
                     message?.let {
                         val payload = String(it.payload)
-                        Log.d(TAG, "Получено сообщение от $topic")
+                        Log.d(TAG, "Сообщение получено: $payload")
                         onMessage(payload)
                     }
                 }
 
-                override fun deliveryComplete(token: IMqttDeliveryToken?) {
-                    // Не используется, т.к. мы только подписываемся
-                }
+                override fun deliveryComplete(token: IMqttDeliveryToken?) {}
             })
+
+            mqttClient?.connect(options)
         } catch (e: MqttException) {
             isConnected = false
-            Log.e(TAG, "Ошибка подключения: ${e.message}", e)
-            onError(e)
+            Log.e(TAG, "Ошибка подключения: ${e.message}")
+            onStatus(ConnectionState.Error(e.message ?: "Неизвестная ошибка"))
         } catch (e: Exception) {
             isConnected = false
-            Log.e(TAG, "Неожиданная ошибка: ${e.message}", e)
-            onError(e)
+            Log.e(TAG, "Неожиданная ошибка: ${e.message}")
+            onStatus(ConnectionState.Error(e.message ?: "Ошибка"))
         }
     }
 
@@ -98,6 +98,4 @@ object MqttClientManager {
             mqttClient = null
         }
     }
-
-    fun isConnected(): Boolean = isConnected
 }

@@ -22,6 +22,9 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
     private val _messages = MutableStateFlow<List<MqttMessageItem>>(emptyList())
     val messages: StateFlow<List<MqttMessageItem>> = _messages
 
+    private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+    val connectionState: StateFlow<ConnectionState> = _connectionState
+
     private var lastMessageTime: Long = 0
     private var connectRequested = false
 
@@ -30,31 +33,26 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startMqttIfNeeded() {
-        if (MqttClientManager.isConnected() || connectRequested) return
+        if (MqttClientManager.isConnected || connectRequested) return
         connectRequested = true
 
-        // Упрощено для MVP: запускаем подключение в отдельном потоке.
-        // В будущем заменить на корутины и Lifecycle-aware управление.
         Thread {
-            try {
-                MqttClientManager.connect(
-                    onMessage = { payload -> handleIncomingMessage(payload) },
-                    onError = { error ->
-                        error.printStackTrace()
-                        connectRequested = false // Разрешаем повторное подключение при ошибке
+            MqttClientManager.connect(
+                onMessage = { payload -> handleIncomingMessage(payload) },
+                onStatus = { state ->
+                    _connectionState.value = state
+                    if (state is ConnectionState.Error || state is ConnectionState.Disconnected) {
+                        connectRequested = false
                     }
-                )
-            } catch (e: Exception) {
-                e.printStackTrace()
-                connectRequested = false
-            }
+                }
+            )
         }.start()
     }
 
-    // Ручное переподключение (кнопка в настройках)
     fun reconnect() {
         MqttClientManager.disconnect()
         connectRequested = false
+        _connectionState.value = ConnectionState.Disconnected
         startMqttIfNeeded()
     }
 
@@ -63,8 +61,6 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val json = JSONObject(payload)
             val device = json.optString("device", "")
-
-            // Если фильтр не пуст и устройство не совпадает — пропускаем сообщение
             if (filter.isNotEmpty() && device != filter) return
 
             val time = if (json.has("time")) json.getString("time") else null
@@ -74,10 +70,8 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
             val now = System.currentTimeMillis()
             val messageItem = MqttMessageItem(payload, now, time, lat, lng)
 
-            // Проверяем интервал для уведомлений
             val intervalMinutes = settings.notifyIntervalMinutes
             if (shouldShowNotification(now, intervalMinutes)) {
-                // Показываем уведомление с полными данными
                 notificationHelper.showNotification(
                     getApplication(),
                     messageItem,
@@ -86,7 +80,6 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
             }
             lastMessageTime = now
 
-            // Добавляем сообщение в список
             _messages.update { list ->
                 val updated = list.toMutableList()
                 updated.add(0, messageItem)
@@ -94,31 +87,23 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
                 updated
             }
         } catch (e: Exception) {
-            // Невалидный JSON или ошибка парсинга — всё равно покажем сообщение, но без фильтрации
             val now = System.currentTimeMillis()
             val fallbackItem = MqttMessageItem(payload, now)
-
             _messages.update { list ->
                 val updated = list.toMutableList()
                 updated.add(0, fallbackItem)
                 if (updated.size > 10) updated.removeAt(updated.lastIndex)
                 updated
             }
-
-            // Показываем уведомление даже для невалидных сообщений, если интервал соблюдён
             if (shouldShowNotification(now)) {
                 notificationHelper.showSimpleNotification(getApplication(), payload)
             }
         }
     }
 
-    /**
-     * Проверяет, нужно ли показывать уведомление на основе интервала
-     */
     private fun shouldShowNotification(now: Long, intervalMinutes: Int = settings.notifyIntervalMinutes): Boolean {
-        if (lastMessageTime == 0L) return true // Первое сообщение всегда показывает уведомление
-        if (intervalMinutes <= 0) return false // Уведомления отключены
-
+        if (lastMessageTime == 0L) return true
+        if (intervalMinutes <= 0) return false
         val diffMinutes = (now - lastMessageTime) / 60000
         return diffMinutes >= intervalMinutes
     }
