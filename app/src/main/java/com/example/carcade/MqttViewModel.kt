@@ -6,7 +6,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import org.json.JSONObject
-import java.util.*
 
 data class MqttMessageItem(
     val body: String,
@@ -15,7 +14,6 @@ data class MqttMessageItem(
     val lat: Double = 0.0,
     val lng: Double = 0.0
 )
-
 
 class MqttViewModel(application: Application) : AndroidViewModel(application) {
     private val settings = SettingsDataStore(application)
@@ -41,10 +39,14 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 MqttClientManager.connect(
                     onMessage = { payload -> handleIncomingMessage(payload) },
-                    onError = { error -> error.printStackTrace() }
+                    onError = { error ->
+                        error.printStackTrace()
+                        connectRequested = false // Разрешаем повторное подключение при ошибке
+                    }
                 )
             } catch (e: Exception) {
                 e.printStackTrace()
+                connectRequested = false
             }
         }.start()
     }
@@ -61,6 +63,7 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
         try {
             val json = JSONObject(payload)
             val device = json.optString("device", "")
+
             // Если фильтр не пуст и устройство не совпадает — пропускаем сообщение
             if (filter.isNotEmpty() && device != filter) return
 
@@ -69,32 +72,55 @@ class MqttViewModel(application: Application) : AndroidViewModel(application) {
             val lng = if (json.has("lng")) json.getDouble("lng") else 0.0
 
             val now = System.currentTimeMillis()
+            val messageItem = MqttMessageItem(payload, now, time, lat, lng)
+
+            // Проверяем интервал для уведомлений
             val intervalMinutes = settings.notifyIntervalMinutes
-            if (lastMessageTime > 0 && intervalMinutes > 0) {
-                val diffMinutes = (now - lastMessageTime) / 60000
-                if (diffMinutes > intervalMinutes) {
-                    // Показываем уведомление (только если приложение активно, т.к. фона нет)
-                    notificationHelper.showNotification(getApplication(), payload)
-                }
+            if (shouldShowNotification(now, intervalMinutes)) {
+                // Показываем уведомление с полными данными
+                notificationHelper.showNotification(
+                    getApplication(),
+                    messageItem,
+                    if (filter.isNotEmpty()) device else ""
+                )
             }
             lastMessageTime = now
 
+            // Добавляем сообщение в список
             _messages.update { list ->
                 val updated = list.toMutableList()
-                updated.add(0, MqttMessageItem(payload, now, time, lat, lng))
+                updated.add(0, messageItem)
                 if (updated.size > 10) updated.removeAt(updated.lastIndex)
                 updated
             }
         } catch (e: Exception) {
             // Невалидный JSON или ошибка парсинга — всё равно покажем сообщение, но без фильтрации
             val now = System.currentTimeMillis()
+            val fallbackItem = MqttMessageItem(payload, now)
+
             _messages.update { list ->
                 val updated = list.toMutableList()
-                updated.add(0, MqttMessageItem(payload, now))
+                updated.add(0, fallbackItem)
                 if (updated.size > 10) updated.removeAt(updated.lastIndex)
                 updated
             }
+
+            // Показываем уведомление даже для невалидных сообщений, если интервал соблюдён
+            if (shouldShowNotification(now)) {
+                notificationHelper.showSimpleNotification(getApplication(), payload)
+            }
         }
+    }
+
+    /**
+     * Проверяет, нужно ли показывать уведомление на основе интервала
+     */
+    private fun shouldShowNotification(now: Long, intervalMinutes: Int = settings.notifyIntervalMinutes): Boolean {
+        if (lastMessageTime == 0L) return true // Первое сообщение всегда показывает уведомление
+        if (intervalMinutes <= 0) return false // Уведомления отключены
+
+        val diffMinutes = (now - lastMessageTime) / 60000
+        return diffMinutes >= intervalMinutes
     }
 
     override fun onCleared() {
